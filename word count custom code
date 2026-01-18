@@ -1,39 +1,211 @@
 /**
- * Permanent Word Count Plugin for Thymer
+ * Enhanced Word Count Plugin for Thymer
  * 
- * Features:
- * - Always-visible word count in status bar
- * - Updates as you type
- * - Click for detailed statistics
+ * Status bar items:
+ * - Today: Xw (%) Xn - workspace words/notes added today
+ * - Total: Xn - total notes in workspace
+ * - Page: Xw - current document word count
  */
 class Plugin extends AppPlugin {
 	
 	onLoad() {
-		// Create status bar item
-		this.statusBarItem = this.ui.addStatusBarItem({
-			icon: 'ti-file-text',
-			label: '0 words',
-			tooltip: 'Word count - Click for details',
-			onClick: () => {
-				this.showDetailedStats();
-			}
-		});
-		// Update word count periodically
-		this.updateInterval = setInterval(() => {
-			this.updateWordCount();
-		}, 1000); // Update every second
-		// Initial update
-		this.updateWordCount();
-		// Add command for manual refresh
+		console.log('[Word Count] Plugin loading...');
+		
+		// Create status bar items
+		this.createStatusBarItems();
+		
+		// Initialize daily tracking
+		this.initializeDailyTracking();
+		
+		// Update today count every 5 seconds
+		this.todayUpdateInterval = setInterval(() => {
+			this.updateTodayCount();
+		}, 10000);
+		
+		// Update total note count every 5 minutes
+		this.totalUpdateInterval = setInterval(() => {
+			this.updateTotalCount();
+		}, 300000);
+		
+		// Update page word count every 5 seconds
+		this.pageUpdateInterval = setInterval(() => {
+			this.updatePageCount();
+		}, 5000);
+		
+		// Initial updates
+		setTimeout(() => {
+			console.log('[Word Count] Running initial updates...');
+			this.updateTodayCount();
+			this.updateTotalCount();
+			this.updatePageCount();
+		}, 500);
+		
+		// Add commands
 		this.ui.addCommandPaletteCommand({
-			label: "Word Count: Refresh",
+			label: "Word Count: Refresh All Stats",
 			icon: "ti-refresh",
 			onSelected: async () => {
-				this.updateWordCount();
+				console.log('[Word Count] Manual refresh triggered');
+				await this.updateTodayCount();
+				await this.updateTotalCount();
+				await this.updatePageCount();
+			}
+		});
+		
+		this.ui.addCommandPaletteCommand({
+			label: "Set Daily Word Goal",
+			icon: "ti-target",
+			onSelected: async () => {
+				await this.showSetGoalDialog();
+			}
+		});
+		
+		console.log('[Word Count] Plugin loaded successfully');
+	}
+	
+	createStatusBarItems() {
+		// Today: workspace words/notes added today
+		this.todayCountItem = this.ui.addStatusBarItem({
+			icon: 'ti-calendar-event',
+			label: 'Today: 0w, 0n',
+			onClick: () => {
+				this.showTodayDetails();
+			}
+		});
+		
+		// Total: workspace note count
+		this.totalCountItem = this.ui.addStatusBarItem({
+			icon: 'ti-notes',
+			label: 'Total: 0n',
+			onClick: () => {
+				this.showWorkspaceDetails();
+			}
+		});
+		
+		// Page: current document word count
+		this.pageCountItem = this.ui.addStatusBarItem({
+			icon: 'ti-file-text',
+			label: 'Page: 0w',
+			onClick: () => {
+				this.showPageDetails();
 			}
 		});
 	}
-	// Get all text from current note
+	
+	// =========================================================================
+	// Daily Tracking Initialization
+	// =========================================================================
+	
+	async initializeDailyTracking() {
+		try {
+			const today = this.getTodayDateString();
+			const storageKey = 'word_count_daily_tracking';
+			const storedJson = localStorage.getItem(storageKey);
+			const stored = storedJson ? JSON.parse(storedJson) : null;
+			
+			console.log('[Word Count] Daily tracking check:', { today, stored });
+			
+			if (!stored || stored.date !== today) {
+				console.log('[Word Count] New day detected, resetting tracking...');
+				const currentStats = await this.getCurrentWorkspaceStats();
+				console.log('[Word Count] Current workspace stats:', currentStats);
+				
+				const newTracking = {
+					date: today,
+					startWordCount: currentStats.totalWords,
+					startNoteCount: currentStats.totalNotes,
+					dailyWordGoal: stored?.dailyWordGoal || null,
+					documentBaselines: {} // Track per-document start counts
+				};
+				
+				localStorage.setItem(storageKey, JSON.stringify(newTracking));
+				console.log('[Word Count] Daily tracking initialized:', newTracking);
+			} else {
+				console.log('[Word Count] Using existing daily tracking for today');
+			}
+		} catch (e) {
+			console.error('[Word Count] Error initializing daily tracking:', e);
+			const storageKey = 'word_count_daily_tracking';
+			localStorage.setItem(storageKey, JSON.stringify({
+				date: this.getTodayDateString(),
+				startWordCount: 0,
+				startNoteCount: 0,
+				dailyWordGoal: null,
+				documentBaselines: {}
+			}));
+		}
+	}
+	
+	getTodayDateString() {
+		const now = new Date();
+		return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+	}
+	
+	// =========================================================================
+	// Get Current Workspace Stats
+	// =========================================================================
+	
+	async getCurrentWorkspaceStats() {
+		try {
+			const collections = await this.data.getAllCollections();
+			console.log(`[Word Count] Found ${collections.length} collections in workspace`);
+			let totalWords = 0;
+			let totalNotes = 0;
+			
+			for (const collection of collections) {
+				const records = await collection.getAllRecords();
+				totalNotes += records.length;
+				console.log(`[Word Count] Collection "${collection.getName()}": ${records.length} records`);
+				
+				for (const record of records) {
+					const text = await this.getRecordText(record);
+					const wordCount = this.countWords(text);
+					totalWords += wordCount;
+				}
+			}
+			
+			console.log(`[Word Count] Workspace totals: ${totalWords} words, ${totalNotes} notes`);
+			return { totalWords, totalNotes };
+		} catch (e) {
+			console.error('[Word Count] Error getting workspace stats:', e);
+			return { totalWords: 0, totalNotes: 0 };
+		}
+	}
+	
+	async getRecordText(record) {
+		try {
+			const lineItems = await record.getLineItems();
+			const textParts = [];
+			
+			for (const item of lineItems) {
+				if (item.segments && item.segments.length > 0) {
+					for (const segment of item.segments) {
+						if (segment.type === 'text' && segment.text) {
+							textParts.push(segment.text);
+						} else if (segment.text && typeof segment.text === 'string') {
+							textParts.push(segment.text);
+						}
+					}
+				}
+			}
+			
+			return textParts.join(' ');
+		} catch (e) {
+			console.error('[Word Count] Error getting record text:', e);
+			return '';
+		}
+	}
+	
+	countWords(text) {
+		if (!text || text.trim().length === 0) return 0;
+		const words = text.trim().split(/\s+/).filter(word => word.length > 0);
+		return words.length;
+	}
+	
+	// =========================================================================
+	// Get Current Page Text and Stats
+	// =========================================================================
+	
 	getAllText() {
 		try {
 			// Method 1: Try to get from g_view items (current visible items)
@@ -53,6 +225,7 @@ class Plugin extends AppPlugin {
 					return allText.join(' ');
 				}
 			}
+			
 			// Method 2: Fallback to DOM scraping
 			const listItems = document.querySelectorAll('.listitem-text, .listitem-heading, .listitem-ulist, .listitem-quote');
 			const allText = [];
@@ -64,20 +237,22 @@ class Plugin extends AppPlugin {
 			});
 			return allText.join(' ');
 		} catch (e) {
-			console.error('Error getting text:', e);
+			console.error('[Word Count] Error getting text:', e);
 			return '';
 		}
 	}
-	// Count words and characters
-	countText(text) {
+	
+	countTextDetailed(text) {
 		if (!text || text.trim().length === 0) {
 			return { words: 0, characters: 0, charactersNoSpaces: 0, lines: 0 };
 		}
+		
 		const words = text.trim().split(/\s+/).filter(word => word.length > 0);
 		const wordCount = words.length;
 		const charCount = text.length;
 		const charNoSpaces = text.replace(/\s/g, '').length;
 		const lines = text.split('\n').length;
+		
 		return {
 			words: wordCount,
 			characters: charCount,
@@ -85,39 +260,237 @@ class Plugin extends AppPlugin {
 			lines: lines
 		};
 	}
-	// Update word count in status bar
-	updateWordCount() {
-		const text = this.getAllText();
-		const counts = this.countText(text);
-		// Update status bar
-		this.statusBarItem.setLabel(`${counts.words} words`);
-		this.statusBarItem.setTooltip(`Words: ${counts.words}\nCharacters: ${counts.characters}\nClick for more details`);
-		// Store counts for detailed view
-		this.currentCounts = counts;
-	}
-	// Show detailed statistics
-	showDetailedStats() {
-		if (!this.currentCounts) {
-			this.updateWordCount();
+	
+	getCurrentPageGuid() {
+		try {
+			const view = window.g_view;
+			if (view && view.record && view.record.guid) {
+				return view.record.guid;
+			}
+			return null;
+		} catch (e) {
+			return null;
 		}
-		const counts = this.currentCounts;
-		const readingTime = Math.ceil(counts.words / 200);
-		const speakingTime = Math.ceil(counts.words / 150);
+	}
+	
+	// =========================================================================
+	// Update Today Count
+	// =========================================================================
+	
+	async updateTodayCount() {
+		try {
+			const storageKey = 'word_count_daily_tracking';
+			const storedJson = localStorage.getItem(storageKey);
+			const tracking = storedJson ? JSON.parse(storedJson) : null;
+			
+			if (!tracking) {
+				this.todayCountItem.setLabel('Today: 0w, 0n');
+				return;
+			}
+			
+			if (tracking.date !== this.getTodayDateString()) {
+				await this.initializeDailyTracking();
+				return;
+			}
+			
+			const currentStats = await this.getCurrentWorkspaceStats();
+			const wordsToday = Math.max(0, currentStats.totalWords - tracking.startWordCount);
+			const notesToday = Math.max(0, currentStats.totalNotes - tracking.startNoteCount);
+			
+			let label = `Today: ${wordsToday}w, ${notesToday}n`;
+			
+			if (tracking.dailyWordGoal && tracking.dailyWordGoal > 0) {
+				const percentage = Math.round((wordsToday / tracking.dailyWordGoal) * 100);
+				label = `Today: ${wordsToday}w (${percentage}%), ${notesToday}n`;
+			}
+			
+			this.todayCountItem.setLabel(label);
+		} catch (e) {
+			console.error('[Word Count] Error updating today count:', e);
+		}
+	}
+	
+	// =========================================================================
+	// Update Total Count (notes only)
+	// =========================================================================
+	
+	async updateTotalCount() {
+		try {
+			const workspaceStats = await this.getCurrentWorkspaceStats();
+			this.totalCountItem.setLabel(`Total: ${workspaceStats.totalNotes}n`);
+		} catch (e) {
+			console.error('[Word Count] Error updating total count:', e);
+		}
+	}
+	
+	// =========================================================================
+	// Update Page Count
+	// =========================================================================
+	
+	async updatePageCount() {
+		try {
+			const text = this.getAllText();
+			const counts = this.countTextDetailed(text);
+			
+			this.pageCountItem.setLabel(`Page: ${counts.words}w`);
+			
+			// Store for detailed view
+			this.currentPageCounts = counts;
+			this.currentPageGuid = this.getCurrentPageGuid();
+		} catch (e) {
+			console.error('[Word Count] Error updating page count:', e);
+		}
+	}
+	
+	// =========================================================================
+	// Show Details Dialogs
+	// =========================================================================
+	
+	async showTodayDetails() {
+		const storageKey = 'word_count_daily_tracking';
+		const storedJson = localStorage.getItem(storageKey);
+		const tracking = storedJson ? JSON.parse(storedJson) : null;
+		if (!tracking) return;
+		
+		const currentStats = await this.getCurrentWorkspaceStats();
+		const wordsToday = Math.max(0, currentStats.totalWords - tracking.startWordCount);
+		const notesToday = Math.max(0, currentStats.totalNotes - tracking.startNoteCount);
+		
+		let message = `Words added today: ${wordsToday}\nNotes added today: ${notesToday}`;
+		
+		if (tracking.dailyWordGoal && tracking.dailyWordGoal > 0) {
+			const percentage = Math.round((wordsToday / tracking.dailyWordGoal) * 100);
+			const remaining = Math.max(0, tracking.dailyWordGoal - wordsToday);
+			message += `\n\nDaily goal: ${tracking.dailyWordGoal} words`;
+			message += `\nProgress: ${percentage}%`;
+			message += `\nRemaining: ${remaining} words`;
+		} else {
+			message += `\n\nNo daily word goal set.`;
+			message += `\nUse 'Set Daily Word Goal' command to set one.`;
+		}
+		
 		this.ui.addToaster({
-			title: "📊 Document Statistics",
-			message: `Words: ${counts.words}
-Characters: ${counts.characters} (${counts.charactersNoSpaces} no spaces)
-Lines: ${counts.lines}
-Reading time: ~${readingTime} ${readingTime === 1 ? 'minute' : 'minutes'}
-Speaking time: ~${speakingTime} ${speakingTime === 1 ? 'minute' : 'minutes'}`,
+			title: "📅 Today's Progress",
+			message: message,
 			dismissible: true,
 			autoDestroyTime: 6000
 		});
 	}
+	
+	async showWorkspaceDetails() {
+		const storageKey = 'word_count_daily_tracking';
+		const storedJson = localStorage.getItem(storageKey);
+		const tracking = storedJson ? JSON.parse(storedJson) : null;
+		
+		const currentStats = await this.getCurrentWorkspaceStats();
+		const wordsToday = tracking ? Math.max(0, currentStats.totalWords - tracking.startWordCount) : 0;
+		const notesToday = tracking ? Math.max(0, currentStats.totalNotes - tracking.startNoteCount) : 0;
+		
+		const message = `Words added today: ${wordsToday}\nTotal words: ${currentStats.totalWords}\n\nNotes added today: ${notesToday}\nTotal notes: ${currentStats.totalNotes}`;
+		
+		this.ui.addToaster({
+			title: "## Workspace",
+			message: message,
+			dismissible: true,
+			autoDestroyTime: 6000
+		});
+	}
+	
+	async showPageDetails() {
+		if (!this.currentPageCounts) {
+			await this.updatePageCount();
+		}
+		
+		const counts = this.currentPageCounts;
+		const readingTime = Math.ceil(counts.words / 200);
+		const speakingTime = Math.ceil(counts.words / 150);
+		
+		// Calculate words added to this document today
+		const storageKey = 'word_count_daily_tracking';
+		const storedJson = localStorage.getItem(storageKey);
+		const tracking = storedJson ? JSON.parse(storedJson) : null;
+		
+		let wordsAddedToday = 0;
+		if (tracking && this.currentPageGuid) {
+			const baseline = tracking.documentBaselines?.[this.currentPageGuid] || 0;
+			wordsAddedToday = Math.max(0, counts.words - baseline);
+			
+			// Update baseline if this is the first time we're seeing this document today
+			if (!tracking.documentBaselines) {
+				tracking.documentBaselines = {};
+			}
+			if (!tracking.documentBaselines[this.currentPageGuid]) {
+				tracking.documentBaselines[this.currentPageGuid] = counts.words;
+				localStorage.setItem(storageKey, JSON.stringify(tracking));
+			}
+		}
+		
+		const message = `Words added today: ${wordsAddedToday}\nCurrent word count: ${counts.words}\n\nCharacter count: ${counts.characters}\nLines: ${counts.lines}\n\nReading time: ~${readingTime} ${readingTime === 1 ? 'minute' : 'minutes'}\nSpeaking time: ~${speakingTime} ${speakingTime === 1 ? 'minute' : 'minutes'}`;
+		
+		this.ui.addToaster({
+			title: "## This Document",
+			message: message,
+			dismissible: true,
+			autoDestroyTime: 8000
+		});
+	}
+	
+	// =========================================================================
+	// Set Daily Word Goal
+	// =========================================================================
+	
+	async showSetGoalDialog() {
+		const storageKey = 'word_count_daily_tracking';
+		const storedJson = localStorage.getItem(storageKey);
+		const tracking = storedJson ? JSON.parse(storedJson) : {};
+		const currentGoal = tracking.dailyWordGoal || 0;
+		
+		const newGoal = prompt(
+			`Set your daily word goal (current: ${currentGoal} words)\n\nEnter 0 to disable goal tracking:`, 
+			currentGoal.toString()
+		);
+		
+		if (newGoal === null) return;
+		
+		const goalNumber = parseInt(newGoal, 10);
+		if (isNaN(goalNumber) || goalNumber < 0) {
+			this.ui.addToaster({
+				title: "Invalid Goal",
+				message: "Please enter a valid number (0 or greater)",
+				dismissible: true,
+				autoDestroyTime: 3000
+			});
+			return;
+		}
+		
+		tracking.dailyWordGoal = goalNumber > 0 ? goalNumber : null;
+		localStorage.setItem(storageKey, JSON.stringify(tracking));
+		
+		await this.updateTodayCount();
+		
+		this.ui.addToaster({
+			title: "Goal Updated",
+			message: goalNumber > 0 
+				? `Daily word goal set to ${goalNumber} words`
+				: 'Daily word goal disabled',
+			dismissible: true,
+			autoDestroyTime: 3000
+		});
+	}
+	
+	// =========================================================================
 	// Clean up on unload
+	// =========================================================================
+	
 	onUnload() {
-		if (this.updateInterval) {
-			clearInterval(this.updateInterval);
+		if (this.todayUpdateInterval) {
+			clearInterval(this.todayUpdateInterval);
+		}
+		if (this.totalUpdateInterval) {
+			clearInterval(this.totalUpdateInterval);
+		}
+		if (this.pageUpdateInterval) {
+			clearInterval(this.pageUpdateInterval);
 		}
 	}
 }
